@@ -54,16 +54,18 @@ func ListCipher() []string {
 
 // PickCipher returns a Cipher of the given name. Derive key from password if given key is empty.
 func PickCipher(name string, key []byte, password string) (Cipher, error) {
-	name = strings.ToUpper(name)
+	name = strings.ToLower(name)
 
 	switch name {
-	case "DUMMY":
+	case "dummy":
 		return &dummy{}, nil
-	case "CHACHA20-IETF-POLY1305":
+	case "chacha20-ietf-poly1305":
+		fallthrough
+	case "chacha20-poly1305":
 		name = aeadChacha20Poly1305
-	case "AES-128-GCM":
-		name = aeadAes128Gcm
-	case "AES-256-GCM":
+	//case "AES-128-GCM":
+	//	name = aeadAes128Gcm
+	case "aes-256-gcm":
 		name = aeadAes256Gcm
 	}
 

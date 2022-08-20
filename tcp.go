@@ -3,8 +3,8 @@ package main
 import (
 	"bufio"
 	"errors"
+	"golang.org/x/net/proxy"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"sync"
@@ -14,24 +14,13 @@ import (
 )
 
 // Create a SOCKS server listening on addr and proxy to server.
-func socksLocal(addr, server string, shadow func(net.Conn) net.Conn) {
+func socksLocal(addr, server, realBack string, shadow func(net.Conn) net.Conn) {
 	logf("SOCKS proxy %s <-> %s", addr, server)
-	tcpLocal(addr, server, shadow, func(c net.Conn) (socks.Addr, error) { return socks.Handshake(c) })
-}
-
-// Create a TCP tunnel from addr to target via server.
-func tcpTun(addr, server, target string, shadow func(net.Conn) net.Conn) {
-	tgt := socks.ParseAddr(target)
-	if tgt == nil {
-		logf("invalid target address %q", target)
-		return
-	}
-	logf("TCP tunnel %s <-> %s <-> %s", addr, server, target)
-	tcpLocal(addr, server, shadow, func(net.Conn) (socks.Addr, error) { return tgt, nil })
+	tcpLocal(addr, server, realBack, shadow, func(c net.Conn) (socks.Addr, error) { return socks.Handshake(c) })
 }
 
 // Listen on addr and proxy to server to reach target from getAddr.
-func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(net.Conn) (socks.Addr, error)) {
+func tcpLocal(addr, server, realBack string, shadow func(net.Conn) net.Conn, getAddr func(net.Conn) (socks.Addr, error)) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		logf("failed to listen on %s: %v", addr, err)
@@ -68,11 +57,23 @@ func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(
 				return
 			}
 
-			rc, err := net.Dial("tcp", server)
+			// start to edit from here
+			// dial to another socks5 connection
+			socks5Dialer, err := proxy.SOCKS5("tcp", server, nil, nil)
 			if err != nil {
-				logf("failed to connect to server %v: %v", server, err)
+				logf("failed to connect to next socks5: %v", err)
 				return
 			}
+
+			nextToRealBackendConn, err := socks5Dialer.Dial("tcp", realBack)
+			if err != nil {
+				logf("failed to dial to real backend: %v", err)
+				return
+			}
+
+			rc := nextToRealBackendConn
+			// add end here
+
 			defer rc.Close()
 			if config.TCPCork {
 				rc = timedCork(rc, 10*time.Millisecond, 1280)
@@ -86,56 +87,6 @@ func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(
 
 			logf("proxy %s <-> %s <-> %s", c.RemoteAddr(), server, tgt)
 			if err = relay(rc, c); err != nil {
-				logf("relay error: %v", err)
-			}
-		}()
-	}
-}
-
-// Listen on addr for incoming connections.
-func tcpRemote(addr string, shadow func(net.Conn) net.Conn) {
-	l, err := net.Listen("tcp", addr)
-	if err != nil {
-		logf("failed to listen on %s: %v", addr, err)
-		return
-	}
-
-	logf("listening TCP on %s", addr)
-	for {
-		c, err := l.Accept()
-		if err != nil {
-			logf("failed to accept: %v", err)
-			continue
-		}
-
-		go func() {
-			defer c.Close()
-			if config.TCPCork {
-				c = timedCork(c, 10*time.Millisecond, 1280)
-			}
-			sc := shadow(c)
-
-			tgt, err := socks.ReadAddr(sc)
-			if err != nil {
-				logf("failed to get target address from %v: %v", c.RemoteAddr(), err)
-				// drain c to avoid leaking server behavioral features
-				// see https://www.ndss-symposium.org/ndss-paper/detecting-probe-resistant-proxies/
-				_, err = io.Copy(ioutil.Discard, c)
-				if err != nil {
-					logf("discard error: %v", err)
-				}
-				return
-			}
-
-			rc, err := net.Dial("tcp", tgt.String())
-			if err != nil {
-				logf("failed to connect to target: %v", err)
-				return
-			}
-			defer rc.Close()
-
-			logf("proxy %s <-> %s", c.RemoteAddr(), tgt)
-			if err = relay(sc, rc); err != nil {
 				logf("relay error: %v", err)
 			}
 		}()
